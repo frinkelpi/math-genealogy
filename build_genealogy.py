@@ -1,64 +1,105 @@
-from tempfile import gettempdir
-from pydot import graph_from_dot_file
-from networkx import drawing, nx_agraph, compose, MultiDiGraph
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""build_genealogy
+
+Usage:
+  build_genealogy (--mathid=<id>|--name=<name>)... [--output=<out>]
+
+Options:
+  --name=<name>   Name in the form "John Doe" or "John D. Doe"
+  --output=<out>  Output file name (.pdf or .png) [default: output.pdf]
+"""
+
+import pydot
+from pick import pick
 from subprocess import call
-
-TMP = gettempdir() + '/'
-
-
-def generate_dot(mathid):
-    print("gathering data for MathID: {}".format(mathid))
-    fn = TMP + '{}.dot'.format(mathid)
-    call(['ggrapher', '-f', fn, '-a', mathid])  # Geneagrapher
+import os
+import requests
+import re
 
 
-def make_graph(mathid, outfmt='pdf'):
-    gc = graph_from_dot_file(TMP + '{}.dot'.format(mathid))
-    gc.set_overlap(0)
-
-    if 'png' in outfmt:
-        gc.write_png('{}.png'.format(mathid), prog='dot')
-
-    if 'pdf' in outfmt:
-        gc.write_pdf('{}.pdf'.format(mathid), prog='dot')
-
-
-def combine_dots(dotlist, mathid):
-    g1 = drawing.nx_agraph.read_dot(TMP + dotlist[-1])
-    g = MultiDiGraph()
-    for d in dotlist:
-        g2 = drawing.nx_agraph.read_dot(TMP + d)
-        g1 = compose(g1, g2)
-    g.add_nodes_from(g1.nodes(data=True))
-    g.add_edges_from(g1.edges(data=True))
-    g.to_directed()
-    g = nx_agraph.to_agraph(g)
-    g.write(TMP + '-'.join(mathid) + '.dot')
+# Plot the given dotfiles to PDF of PNG file, merging nodes if necessary
+def make_graph(dotfiles, output):
+    # Get graphs
+    graphs = [pydot.graph_from_dot_file(d)[0] for d in dotfiles]
+    # Combine graphs
+    graph = combine_graphs(graphs)
+    # Plot graph
+    graph.set_overlap(0)
+    if output.endswith(".png"):
+        func = graph.write_png
+    elif output.endswith(".pdf"):
+        func = graph.write_pdf
+    func(output, prog='dot')
+    print("Wrote {}".format(output))
 
 
-def graph_genealogy(math_id, outformat='pdf'):
-    try:
-        make_graph(math_id, outformat)
-    except Exception:  # file wasn't found or is corrupt
-        generate_dot(math_id)
-        make_graph(math_id, outformat)
+# Combine pydot graphs at nodes
+def combine_graphs(graphs):
+    print("Combining graphs...")
+    graph = graphs[0]
+    names = [n.get_name() for n in graph.get_nodes()]
+    # Add nodes
+    for graph2 in graphs[1:]:
+        for n in graph2.get_nodes():
+            if not graph2.get_name() in names:
+                graph.add_node(n)
+    # Add edges
+    for graph2 in graphs[1:]:
+        for e in graph2.get_edges():
+            if e not in graph.get_edges():
+                graph.add_edge(e)
+    return graph
 
 
-def graph_combined_genealogy(mathid, outfmt='pdf'):
-    for i in mathid:
-        graph_genealogy(i, outfmt)
-    # combined plot if more than one mathid specified
-    if len(mathid) > 1:
-        names = [i + ".dot" for i in mathid]
-        combine_dots(names, mathid)
-        make_graph('-'.join(mathid), outfmt)
+# Get Math Genealogy data by calling Geneagrapher
+def get_dotfile(mathid, cache=True):
+    print("Gathering data for MathID: {}".format(mathid))
+    # Setup temporary folder
+    tmpfolder = "/tmp/mathgenealogy/"
+    if not os.path.exists(tmpfolder):
+        os.mkdir(tmpfolder)
+    filename = tmpfolder + str(mathid) + ".dot"
+    if not cache or not os.path.isfile(filename):
+        call(['ggrapher', '-f', filename, '-a', mathid, "-v"])
+    else:
+        print("Using cached data")
+    return filename
+
+
+# Get person's id
+def getPerson(name):
+    print("Looking up {}".format(name))
+    name = name.split(" ")
+    # Make request
+    r = requests.post("https://www.genealogy.math.ndsu.nodak.edu/query-prep.php", data={"given_name": name[0], "family_name": name[-1]})
+    # Find results
+    r = list(re.findall("<a href=\"id\.php\?id=(\d+)\">(.*?)</a>", r.text))
+    if len(r) == 0:
+        # No resutls
+        print("Error: no results found")
+        exit(1)
+    elif len(r) > 1:
+        # Several results
+        r, _ = pick(r, "Several results have been found, please make a choice:")
+    else:
+        # One result
+        r = r[0]
+    print("Found " + r[1])
+    return r[0]
+
+
+def graph_genealogy(mathids, names, output):
+    # Get mathids
+    for n in names:
+        mathids.append(getPerson(n))
+    # Get dotfiles
+    dotfiles = [get_dotfile(m) for m in mathids]
+    # Make graph
+    make_graph(dotfiles, output)
 
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser
-    p = ArgumentParser(description='easy interface to Math Genealogy Project Plotter')
-    p.add_argument('mathid', help='Math ID of person(s)', type=str, nargs='+')
-    p.add_argument('-o', '--output', help='output format [pdf png]', default=['pdf'], nargs='+')
-    p = p.parse_args()
-
-    graph_combined_genealogy(p.mathid, p.output)
+    from docopt import docopt
+    args = docopt(__doc__)
+    graph_genealogy(args["--mathid"], args["--name"], args["--output"])
